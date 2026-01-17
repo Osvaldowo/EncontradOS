@@ -15,7 +15,24 @@ Notifications.setNotificationHandler({
   }),
 });
 
+// Definición de la tarea en segundo plano
+TaskManager.defineTask(GEOFENCING_TASK_NAME, ({ data: { eventType, region }, error }) => {
+  if (error) return;
+
+  if (eventType === Location.GeofencingEventType.Enter) {
+    Notifications.scheduleNotificationAsync({
+      content: {
+        title: "¡Mascota perdida cerca! 🐾",
+        body: `Estás en la zona donde se vio a una mascota. ¡Mantente alerta!`,
+        data: { region },
+      },
+      trigger: null,
+    });
+  }
+});
+
 export default function App() {
+  const [isLoading, setIsLoading] = useState(true);
   const [location, setLocation] = useState(null);
   const [modalVisible, setModalVisible] = useState(false);
   const [petName, setPetName] = useState('');
@@ -25,6 +42,46 @@ export default function App() {
   // Ref para no repetir notificaciones de la misma mascota en la misma sesión
   const notifiedPets = useRef(new Set());
 
+  // Efecto para Geofencing y Alertas inmediatas
+  useEffect(() => {
+    const manejarAlertasYGeofencing = async () => {
+      const { status: authStatus } = await Notifications.requestPermissionsAsync();
+      const { status: bgStatus } = await Location.requestBackgroundPermissionsAsync();
+      
+      if (bgStatus === 'granted' && lostPets.length > 0) {
+        const regions = lostPets.map(pet => ({
+          identifier: pet.id,
+          latitude: pet.latitud,
+          longitude: pet.longitud,
+          radius: 5, 
+          notifyOnEnter: true,
+          notifyOnExit: false,
+        }));
+
+        await Location.startGeofencingAsync(GEOFENCING_TASK_NAME, regions);
+
+        // Lógica de notificación para nuevos reportes (Simulacro de Broadcast)
+        const ultimaMascota = lostPets[lostPets.length - 1];
+        const ahora = new Date().getTime();
+        const tiempoReporte = ultimaMascota.timestamp?.seconds * 1000;
+
+        if (tiempoReporte && (ahora - tiempoReporte < 10000)) { 
+          await Notifications.scheduleNotificationAsync({
+            content: {
+              title: "🚨 ¡ALERTA ENCONTRADOS!",
+              body: `Se acaba de reportar a ${ultimaMascota.nombre} cerca de tu posición.`,
+              data: { petId: ultimaMascota.id },
+            },
+            trigger: null,
+          });
+        }
+      }
+    };
+
+    manejarAlertasYGeofencing();
+  }, [lostPets]);
+
+  // Efecto para obtener ubicación inicial y escuchar Firebase
   useEffect(() => {
     // Identificador del dispositivo
     const id = Device.osBuildId || Device.modelName || 'anonymous';
@@ -45,6 +102,18 @@ export default function App() {
       // Obtener posición inicial
       let loc = await Location.getCurrentPositionAsync({});
       setLocation(loc);
+      setTimeout(() => {
+        setIsLoading(false);
+      }, 2000);
+    })();
+
+    const q = query(collection(db, "mascotas"));
+    const unsubscribe = onSnapshot(q, (querySnapshot) => {
+      const pets = [];
+      querySnapshot.forEach((doc) => {
+        pets.push({ id: doc.id, ...doc.data() });
+      });
+      setLostPets(pets);
 
       // RASTREO EN TIEMPO REAL: Verificar proximidad mientras el usuario camina
       locationSubscription = await Location.watchPositionAsync(
@@ -151,6 +220,10 @@ export default function App() {
       Alert.alert("Error", "No se pudo enviar el reporte.");
     }
   };
+
+  if (isLoading) {
+    return <LoadingScreen />;
+  }
 
   return (
     <View style={styles.container}>
