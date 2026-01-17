@@ -84,9 +84,6 @@ export default function App() {
   manejarAlertasYGeofencing();
 }, [lostPets]); // Se activa cada vez que la lista de mascotas cambia
 
-  setupGeofencing();
-}, [lostPets]); // Se actualiza cada vez que alguien sube una mascota nueva
-
   useEffect(() => {
     (async () => {
       let { status } = await Location.requestForegroundPermissionsAsync();
