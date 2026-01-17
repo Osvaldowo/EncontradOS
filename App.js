@@ -1,13 +1,12 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { StyleSheet, View, Text, TouchableOpacity, Modal, TextInput, Button, Alert, Dimensions } from 'react-native';
-import MapView, { Marker } from 'react-native-maps';
+import MapView, { Marker, Circle } from 'react-native-maps';
 import * as Location from 'expo-location';
 import * as Notifications from 'expo-notifications';
 import { supabase } from './supabaseConfig'; 
-import * as Device from 'expo-device'; // Importar para identificar el equipo
+import * as Device from 'expo-device'; 
 
-
-// 1. Configuración de Notificaciones para que se vean SIEMPRE
+// 1. Configuración de Notificaciones
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
     shouldShowAlert: true,
@@ -22,104 +21,136 @@ export default function App() {
   const [petName, setPetName] = useState('');
   const [lostPets, setLostPets] = useState([]);
   const [deviceId, setDeviceId] = useState('');
+  
+  // Ref para no repetir notificaciones de la misma mascota en la misma sesión
+  const notifiedPets = useRef(new Set());
 
   useEffect(() => {
-    // Obtener un ID único para este celular
+    // Identificador del dispositivo
     const id = Device.osBuildId || Device.modelName || 'anonymous';
     setDeviceId(id);
+
+    let locationSubscription;
+
     (async () => {
-      // Pedir permisos de GPS y Notificaciones al iniciar
+      // Pedir permisos
       let { status: gpsStatus } = await Location.requestForegroundPermissionsAsync();
       let { status: notifStatus } = await Notifications.requestPermissionsAsync();
       
       if (gpsStatus !== 'granted') {
-        Alert.alert("Permiso denegado", "Necesitamos tu ubicación para mostrarte el mapa.");
+        Alert.alert("Permiso denegado", "Se necesita GPS para el mapa.");
         return;
       }
-      
+
+      // Obtener posición inicial
       let loc = await Location.getCurrentPositionAsync({});
       setLocation(loc);
+
+      // RASTREO EN TIEMPO REAL: Verificar proximidad mientras el usuario camina
+      locationSubscription = await Location.watchPositionAsync(
+        {
+          accuracy: Location.Accuracy.High,
+          distanceInterval: 10, // Cada 10 metros detecta movimiento
+        },
+        (newLocation) => {
+          setLocation(newLocation);
+          verificarProximidad(newLocation, lostPets);
+        }
+      );
     })();
 
-    // 2. Cargar mascotas iniciales de Supabase
     fetchPets();
 
-    // 3. EL BROADCAST: Escuchar en tiempo real cuando alguien agrega una mascota
+    // ESCUCHAR SUPABASE: Solo actualiza el mapa, la notificación la maneja el Geofencing
     const subscription = supabase
       .channel('public:mascotas')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'mascotas' }, payload => {
-        console.log('¡Broadcast recibido!', payload.new);
-        
-        // Actualizar el mapa inmediatamente para todos
-        setLostPets(current => [payload.new, ...current]);
-
-        // Disparar la alerta sonora y visual
-        Notifications.scheduleNotificationAsync({
-          content: {
-            title: "🚨 ¡NUEVA ALERTA DE MASCOTA!",
-            body: `Se acaba de reportar a ${payload.new.nombre} cerca de tu posición.`,
-          },
-          trigger: null,
+        setLostPets(current => {
+          const updatedList = [payload.new, ...current];
+          // Si llega una nueva y estoy cerca, avisar de inmediato
+          if (location) verificarProximidad(location, [payload.new]);
+          return updatedList;
         });
       })
       .subscribe();
 
-    return () => supabase.removeChannel(subscription);
-  }, []);
+    return () => {
+      if (locationSubscription) locationSubscription.remove();
+      supabase.removeChannel(subscription);
+    };
+  }, [lostPets]);
 
   const fetchPets = async () => {
     const { data, error } = await supabase.from('mascotas').select('*');
     if (data) setLostPets(data);
-    if (error) console.log("Error al cargar:", error.message);
   };
 
-  const reportarMascota = async () => {
-  if (!petName || !location) return Alert.alert("Error", "Faltan datos");
+  // --- LÓGICA DE GEOCERCAS ---
+  const calcularDistancia = (lat1, lon1, lat2, lon2) => {
+    const R = 6371e3; // Radio de la Tierra en metros
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+              Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+              Math.sin(dLon/2) * Math.sin(dLon/2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    return R * c;
+  };
 
-  console.log("🔍 Verificando duplicados...");
-
-  try {
-    // 1. BUSCAR SI ESTE USUARIO YA REPORTÓ ESTE NOMBRE
-    const { data: existente, error: errorCheck } = await supabase
-      .from('mascotas')
-      .select('id')
-      .eq('nombre', petName)
-      .eq('user_id', deviceId); // Filtramos por el ID de este celular
-
-    if (errorCheck) throw errorCheck;
-
-    // 2. SI EXISTE, FRENAR EL PROCESO
-    if (existente && existente.length > 0) {
-      return Alert.alert(
-        "Reporte duplicado", 
-        "Ya has reportado a esta mascota anteriormente. No es necesario enviarlo de nuevo."
+  const verificarProximidad = (userLoc, petsArray) => {
+    const RADIUS = 1000; // 1000 metros
+    petsArray.forEach(pet => {
+      const dist = calcularDistancia(
+        userLoc.coords.latitude, userLoc.coords.longitude,
+        pet.latitud, pet.longitud
       );
-    }
 
-    // 3. SI NO EXISTE, PROCEDER CON EL REGISTRO
-    const { error: errorInsert } = await supabase
-      .from('mascotas')
-      .insert([
+      if (dist <= RADIUS && !notifiedPets.current.has(pet.id)) {
+        Notifications.scheduleNotificationAsync({
+          content: {
+            title: "🐾 ¡Mascota Cerca!",
+            body: `Entraste al perímetro de ${pet.nombre}. ¡Mantente alerta!`,
+          },
+          trigger: null,
+        });
+        notifiedPets.current.add(pet.id);
+      }
+    });
+  };
+
+  // --- LÓGICA DE REPORTE (CON VALIDACIÓN DE DUPLICADOS) ---
+  const reportarMascota = async () => {
+    if (!petName || !location) return Alert.alert("Error", "Faltan datos");
+
+    try {
+      const { data: existente } = await supabase
+        .from('mascotas')
+        .select('id')
+        .eq('nombre', petName)
+        .eq('user_id', deviceId);
+
+      if (existente && existente.length > 0) {
+        return Alert.alert("Reporte duplicado", "Ya reportaste a esta mascota.");
+      }
+
+      const { error } = await supabase.from('mascotas').insert([
         { 
           nombre: petName, 
           latitud: location.coords.latitude, 
           longitud: location.coords.longitude,
-          user_id: deviceId // Guardamos quién lo reportó
+          user_id: deviceId 
         }
       ]);
 
-    if (errorInsert) throw errorInsert;
+      if (error) throw error;
 
-    console.log("✅ Reporte único guardado");
-    setModalVisible(false);
-    setPetName('');
-    Alert.alert("¡Enviado!", "Tu reporte ha sido compartido.");
-
-  } catch (err) {
-    console.error(err);
-    Alert.alert("Error", "Hubo un problema al procesar el reporte.");
-  }
-};
+      setModalVisible(false);
+      setPetName('');
+      Alert.alert("¡Enviado!", "Reporte compartido.");
+    } catch (err) {
+      Alert.alert("Error", "No se pudo enviar el reporte.");
+    }
+  };
 
   return (
     <View style={styles.container}>
@@ -129,39 +160,41 @@ export default function App() {
           initialRegion={{
             latitude: location.coords.latitude,
             longitude: location.coords.longitude,
-            latitudeDelta: 0.005,
-            longitudeDelta: 0.005,
+            latitudeDelta: 0.01,
+            longitudeDelta: 0.01,
           }}
           showsUserLocation={true}
         >
           {lostPets.map(pet => (
-            // Solo dibujar si tiene coordenadas válidas
-            pet.latitud && pet.longitud && (
+            <React.Fragment key={pet.id}>
               <Marker 
-                key={pet.id}
                 coordinate={{ latitude: pet.latitud, longitude: pet.longitud }}
-                title={`¡${pet.nombre} perdido!`}
+                title={pet.nombre}
                 pinColor="red"
               />
-            )
+              <Circle 
+                center={{ latitude: pet.latitud, longitude: pet.longitud }}
+                radius={1000}
+                fillColor="rgba(255, 0, 0, 0.2)"
+                strokeColor="rgba(255, 0, 0, 0.5)"
+              />
+            </React.Fragment>
           ))}
         </MapView>
       ) : (
         <View style={styles.loading}><Text>Localizando GPS...</Text></View>
       )}
 
-      {/* Botón flotante para reportar */}
       <TouchableOpacity style={styles.fab} onPress={() => setModalVisible(true)}>
         <Text style={styles.fabText}>+</Text>
       </TouchableOpacity>
 
-      {/* Ventana para ingresar el reporte */}
       <Modal visible={modalVisible} animationType="slide" transparent={true}>
         <View style={styles.modalContent}>
           <Text style={styles.modalTitle}>🐾 Reportar Mascota</Text>
           <TextInput 
             style={styles.input} 
-            placeholder="Ej: Golden Retriever con collar" 
+            placeholder="Nombre de la mascota" 
             value={petName}
             onChangeText={setPetName}
           />
@@ -175,7 +208,6 @@ export default function App() {
   );
 }
 
-// ESTA ES LA PARTE QUE TE FALTABA Y CAUSABA EL ERROR
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#fff' },
   map: { width: Dimensions.get('window').width, height: Dimensions.get('window').height },
@@ -183,15 +215,13 @@ const styles = StyleSheet.create({
   fab: { 
     position: 'absolute', bottom: 40, alignSelf: 'center', 
     backgroundColor: '#ff4757', width: 70, height: 70, borderRadius: 35, 
-    justifyContent: 'center', alignItems: 'center', elevation: 8,
-    shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 4.65
+    justifyContent: 'center', alignItems: 'center', elevation: 8
   },
   fabText: { color: 'white', fontSize: 35, fontWeight: 'bold' },
   modalContent: { 
     marginTop: '50%', marginHorizontal: 20, backgroundColor: 'white', 
-    padding: 30, borderRadius: 25, elevation: 20,
-    shadowColor: '#000', shadowOffset: { width: 0, height: 10 }, shadowOpacity: 0.5, shadowRadius: 13
+    padding: 30, borderRadius: 25, elevation: 20
   },
-  modalTitle: { fontSize: 22, fontWeight: 'bold', marginBottom: 20, textAlign: 'center', color: '#2f3542' },
+  modalTitle: { fontSize: 22, fontWeight: 'bold', marginBottom: 20, textAlign: 'center' },
   input: { borderBottomWidth: 1, borderColor: '#ddd', marginBottom: 25, padding: 10, fontSize: 16 }
 });
