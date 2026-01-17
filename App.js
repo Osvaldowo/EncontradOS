@@ -12,7 +12,7 @@ const GEOFENCING_TASK_NAME = 'ALERTA_MASCOTA_CERCANA';
 // CONFIGURAR CÓMO SE VEN LAS NOTIFICACIONES
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
-    shouldShowAlert: true,
+    shouldShowAlert: true, // ¡ESTO ES CLAVE PARA iOS!
     shouldPlaySound: true,
     shouldSetBadge: false,
   }),
@@ -40,27 +40,49 @@ export default function App() {
   const [petName, setPetName] = useState('');
   const [lostPets, setLostPets] = useState([]);
 
-  useEffect(() => {
-  const setupGeofencing = async () => {
-    // Pedir permisos de notificaciones y ubicación en segundo plano
+ useEffect(() => {
+  const manejarAlertasYGeofencing = async () => {
+    // 1. PEDIR PERMISOS (Indispensable)
     const { status: authStatus } = await Notifications.requestPermissionsAsync();
     const { status: bgStatus } = await Location.requestBackgroundPermissionsAsync();
     
     if (bgStatus === 'granted' && lostPets.length > 0) {
-      // Convertimos los perritos de Firebase en "Cercas" de 200 metros
+      // 2. CONFIGURAR GEOFENCING (Para cuando el usuario camine hacia una zona)
       const regions = lostPets.map(pet => ({
         identifier: pet.id,
         latitude: pet.latitud,
         longitude: pet.longitud,
-        radius: 200, // Radio en metros
+        radius: 5, // Tu radio de 5 metros para pruebas
         notifyOnEnter: true,
         notifyOnExit: false,
       }));
 
       await Location.startGeofencingAsync(GEOFENCING_TASK_NAME, regions);
-      console.log("Geofencing activado para", regions.length, "mascotas");
+      console.log("Geofencing activo para", regions.length, "mascotas");
+
+      // 3. SIMULACRO DE BROADCAST (Para avisar a todos al instante del reporte)
+      // Tomamos la última mascota agregada a la lista
+      const ultimaMascota = lostPets[lostPets.length - 1];
+      const ahora = new Date().getTime();
+      // Convertimos el timestamp de Firebase a milisegundos
+      const tiempoReporte = ultimaMascota.timestamp?.seconds * 1000;
+
+      // Si el reporte ocurrió hace menos de 10 segundos, lanzamos la notificación global
+      if (tiempoReporte && (ahora - tiempoReporte < 10000)) { 
+         await Notifications.scheduleNotificationAsync({
+           content: {
+             title: "🚨 ¡ALERTA ENCONTRADOS!",
+             body: `Se acaba de reportar a ${ultimaMascota.nombre} cerca de tu posición.`,
+             data: { petId: ultimaMascota.id },
+           },
+           trigger: null, // Envío inmediato
+         });
+      }
     }
   };
+
+  manejarAlertasYGeofencing();
+}, [lostPets]); // Se activa cada vez que la lista de mascotas cambia
 
   setupGeofencing();
 }, [lostPets]); // Se actualiza cada vez que alguien sube una mascota nueva
