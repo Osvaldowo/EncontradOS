@@ -1,37 +1,17 @@
 import React, { useState, useEffect } from 'react';
-import { StyleSheet, View, Text, TouchableOpacity, Modal, TextInput, Button } from 'react-native';
+import { StyleSheet, View, Text, TouchableOpacity, Modal, TextInput, Button, Alert, Dimensions } from 'react-native';
 import MapView, { Marker } from 'react-native-maps';
 import * as Location from 'expo-location';
-import { db } from './firebaseConfig'; 
-import { collection, addDoc, query, onSnapshot } from "firebase/firestore";
-import * as TaskManager from 'expo-task-manager';
 import * as Notifications from 'expo-notifications';
+import { supabase } from './supabaseConfig'; 
 
-const GEOFENCING_TASK_NAME = 'ALERTA_MASCOTA_CERCANA';
-
-// CONFIGURAR CÓMO SE VEN LAS NOTIFICACIONES
+// 1. Configuración de Notificaciones para que se vean SIEMPRE
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
-    shouldShowAlert: true, // ¡ESTO ES CLAVE PARA iOS!
+    shouldShowAlert: true,
     shouldPlaySound: true,
     shouldSetBadge: false,
   }),
-});
-
-// ESTA FUNCIÓN SE EJECUTA CUANDO ENTRAS EN UNA ZONA
-TaskManager.defineTask(GEOFENCING_TASK_NAME, ({ data: { eventType, region }, error }) => {
-  if (error) return;
-
-  if (eventType === Location.GeofencingEventType.Enter) {
-    Notifications.scheduleNotificationAsync({
-      content: {
-        title: "¡Mascota perdida cerca! 🐾",
-        body: `Estás en la zona donde se vio a una mascota. ¡Mantente alerta!`,
-        data: { region },
-      },
-      trigger: null, // Envío inmediato
-    });
-  }
 });
 
 export default function App() {
@@ -40,92 +20,78 @@ export default function App() {
   const [petName, setPetName] = useState('');
   const [lostPets, setLostPets] = useState([]);
 
- useEffect(() => {
-  const manejarAlertasYGeofencing = async () => {
-    // 1. PEDIR PERMISOS (Indispensable)
-    const { status: authStatus } = await Notifications.requestPermissionsAsync();
-    const { status: bgStatus } = await Location.requestBackgroundPermissionsAsync();
-    
-    if (bgStatus === 'granted' && lostPets.length > 0) {
-      // 2. CONFIGURAR GEOFENCING (Para cuando el usuario camine hacia una zona)
-      const regions = lostPets.map(pet => ({
-        identifier: pet.id,
-        latitude: pet.latitud,
-        longitude: pet.longitud,
-        radius: 5, // Tu radio de 5 metros para pruebas
-        notifyOnEnter: true,
-        notifyOnExit: false,
-      }));
-
-      await Location.startGeofencingAsync(GEOFENCING_TASK_NAME, regions);
-      console.log("Geofencing activo para", regions.length, "mascotas");
-
-      // 3. SIMULACRO DE BROADCAST (Para avisar a todos al instante del reporte)
-      // Tomamos la última mascota agregada a la lista
-      const ultimaMascota = lostPets[lostPets.length - 1];
-      const ahora = new Date().getTime();
-      // Convertimos el timestamp de Firebase a milisegundos
-      const tiempoReporte = ultimaMascota.timestamp?.seconds * 1000;
-
-      // Si el reporte ocurrió hace menos de 10 segundos, lanzamos la notificación global
-      if (tiempoReporte && (ahora - tiempoReporte < 10000)) { 
-         await Notifications.scheduleNotificationAsync({
-           content: {
-             title: "🚨 ¡ALERTA ENCONTRADOS!",
-             body: `Se acaba de reportar a ${ultimaMascota.nombre} cerca de tu posición.`,
-             data: { petId: ultimaMascota.id },
-           },
-           trigger: null, // Envío inmediato
-         });
-      }
-    }
-  };
-
-  manejarAlertasYGeofencing();
-}, [lostPets]); // Se activa cada vez que la lista de mascotas cambia
-
-  setupGeofencing();
-}, [lostPets]); // Se actualiza cada vez que alguien sube una mascota nueva
-
   useEffect(() => {
     (async () => {
-      let { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') return;
+      // Pedir permisos de GPS y Notificaciones al iniciar
+      let { status: gpsStatus } = await Location.requestForegroundPermissionsAsync();
+      let { status: notifStatus } = await Notifications.requestPermissionsAsync();
+      
+      if (gpsStatus !== 'granted') {
+        Alert.alert("Permiso denegado", "Necesitamos tu ubicación para mostrarte el mapa.");
+        return;
+      }
+      
       let loc = await Location.getCurrentPositionAsync({});
       setLocation(loc);
     })();
 
-    // ESCUCHAR MASCOTAS EN TIEMPO REAL
-    const q = query(collection(db, "mascotas"));
-    const unsubscribe = onSnapshot(q, (querySnapshot) => {
-      const pets = [];
-      querySnapshot.forEach((doc) => {
-        pets.push({ id: doc.id, ...doc.data() });
-      });
-      setLostPets(pets);
-    });
-    return () => unsubscribe();
+    // 2. Cargar mascotas iniciales de Supabase
+    fetchPets();
+
+    // 3. EL BROADCAST: Escuchar en tiempo real cuando alguien agrega una mascota
+    const subscription = supabase
+      .channel('public:mascotas')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'mascotas' }, payload => {
+        console.log('¡Broadcast recibido!', payload.new);
+        
+        // Actualizar el mapa inmediatamente para todos
+        setLostPets(current => [payload.new, ...current]);
+
+        // Disparar la alerta sonora y visual
+        Notifications.scheduleNotificationAsync({
+          content: {
+            title: "🚨 ¡NUEVA ALERTA DE MASCOTA!",
+            body: `Se acaba de reportar a ${payload.new.nombre} cerca de tu posición.`,
+          },
+          trigger: null,
+        });
+      })
+      .subscribe();
+
+    return () => supabase.removeChannel(subscription);
   }, []);
 
+  const fetchPets = async () => {
+    const { data, error } = await supabase.from('mascotas').select('*');
+    if (data) setLostPets(data);
+    if (error) console.log("Error al cargar:", error.message);
+  };
+
   const reportarMascota = async () => {
-    try {
-      await addDoc(collection(db, "mascotas"), {
-        nombre: petName,
-        latitud: location.coords.latitude,
-        longitud: location.coords.longitude,
-        timestamp: new Date()
-      });
+    if (!petName || !location) return Alert.alert("Espera", "Escribe un nombre o descripción.");
+
+    const { error } = await supabase
+      .from('mascotas')
+      .insert([
+        { 
+          nombre: petName, 
+          latitud: location.coords.latitude, 
+          longitud: location.coords.longitude 
+        }
+      ]);
+
+    if (error) {
+      Alert.alert("Error de conexión", error.message);
+    } else {
       setModalVisible(false);
       setPetName('');
-      alert("¡Alerta enviada a la comunidad!");
-    } catch (e) {
-      console.error("Error al subir: ", e);
+      Alert.alert("¡Enviado!", "Tu reporte ha sido compartido con la comunidad.");
     }
   };
 
   return (
     <View style={styles.container}>
-      {location && (
+      {location ? (
         <MapView 
           style={styles.map} 
           initialRegion={{
@@ -137,52 +103,63 @@ export default function App() {
           showsUserLocation={true}
         >
           {lostPets.map(pet => (
-            <Marker 
-              key={pet.id}
-              coordinate={{ latitude: pet.latitud, longitude: pet.longitud }}
-              title={`¡${pet.nombre} perdido!`}
-              pinColor="red"
-            />
+            // Solo dibujar si tiene coordenadas válidas
+            pet.latitud && pet.longitud && (
+              <Marker 
+                key={pet.id}
+                coordinate={{ latitude: pet.latitud, longitude: pet.longitud }}
+                title={`¡${pet.nombre} perdido!`}
+                pinColor="red"
+              />
+            )
           ))}
         </MapView>
+      ) : (
+        <View style={styles.loading}><Text>Localizando GPS...</Text></View>
       )}
 
-      {/* BOTÓN FLOTANTE ESTILO POKEMON GO */}
+      {/* Botón flotante para reportar */}
       <TouchableOpacity style={styles.fab} onPress={() => setModalVisible(true)}>
         <Text style={styles.fabText}>+</Text>
       </TouchableOpacity>
 
-      {/* MODAL DE REPORTE */}
+      {/* Ventana para ingresar el reporte */}
       <Modal visible={modalVisible} animationType="slide" transparent={true}>
         <View style={styles.modalContent}>
-          <Text style={styles.modalTitle}>Reportar Mascota Perdida</Text>
+          <Text style={styles.modalTitle}>🐾 Reportar Mascota</Text>
           <TextInput 
             style={styles.input} 
-            placeholder="Nombre o descripción (ej: Perro Husky)" 
+            placeholder="Ej: Golden Retriever con collar" 
             value={petName}
             onChangeText={setPetName}
           />
-          <Button title="Lanzar Alerta" onPress={reportarMascota} color="#ff4757" />
-          <Button title="Cancelar" onPress={() => setModalVisible(false)} color="#2f3542" />
+          <View style={{gap: 10}}>
+            <Button title="Lanzar Alerta" onPress={reportarMascota} color="#ff4757" />
+            <Button title="Cancelar" onPress={() => setModalVisible(false)} color="#2f3542" />
+          </View>
         </View>
       </Modal>
     </View>
   );
 }
 
+// ESTA ES LA PARTE QUE TE FALTABA Y CAUSABA EL ERROR
 const styles = StyleSheet.create({
-  container: { flex: 1 },
-  map: { width: '100%', height: '100%' },
+  container: { flex: 1, backgroundColor: '#fff' },
+  map: { width: Dimensions.get('window').width, height: Dimensions.get('window').height },
+  loading: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   fab: { 
-    position: 'absolute', bottom: 30, alignSelf: 'center',
-    backgroundColor: '#ff4757', width: 70, height: 70, borderRadius: 35,
-    justifyContent: 'center', alignItems: 'center', elevation: 5
+    position: 'absolute', bottom: 40, alignSelf: 'center', 
+    backgroundColor: '#ff4757', width: 70, height: 70, borderRadius: 35, 
+    justifyContent: 'center', alignItems: 'center', elevation: 8,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 4.65
   },
-  fabText: { color: 'white', fontSize: 40, fontWeight: 'bold' },
+  fabText: { color: 'white', fontSize: 35, fontWeight: 'bold' },
   modalContent: { 
-    marginTop: 150, marginHorizontal: 20, backgroundColor: 'white', 
-    padding: 30, borderRadius: 20, elevation: 10 
+    marginTop: '50%', marginHorizontal: 20, backgroundColor: 'white', 
+    padding: 30, borderRadius: 25, elevation: 20,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 10 }, shadowOpacity: 0.5, shadowRadius: 13
   },
-  modalTitle: { fontSize: 20, fontWeight: 'bold', marginBottom: 15, textAlign: 'center' },
-  input: { borderBottomWidth: 1, marginBottom: 20, padding: 5 }
+  modalTitle: { fontSize: 22, fontWeight: 'bold', marginBottom: 20, textAlign: 'center', color: '#2f3542' },
+  input: { borderBottomWidth: 1, borderColor: '#ddd', marginBottom: 25, padding: 10, fontSize: 16 }
 });
