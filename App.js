@@ -3,23 +3,96 @@ import { StyleSheet, View, Text, TouchableOpacity, Modal, TextInput, Button } fr
 import MapView, { Marker } from 'react-native-maps';
 import * as Location from 'expo-location';
 import { db } from './firebaseConfig'; 
-import { collection, addDoc, query, onSnapshot } from "firebase/firestore"; 
+import { collection, addDoc, query, onSnapshot } from "firebase/firestore";
+import * as TaskManager from 'expo-task-manager';
+import * as Notifications from 'expo-notifications';
+import LoadingScreen from './LoadingScreen';
+
+// Configuración de Geofencing y Notificaciones
+const GEOFENCING_TASK_NAME = 'ALERTA_MASCOTA_CERCANA';
+
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true, 
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+  }),
+});
+
+// Definición de la tarea en segundo plano
+TaskManager.defineTask(GEOFENCING_TASK_NAME, ({ data: { eventType, region }, error }) => {
+  if (error) return;
+
+  if (eventType === Location.GeofencingEventType.Enter) {
+    Notifications.scheduleNotificationAsync({
+      content: {
+        title: "¡Mascota perdida cerca! 🐾",
+        body: `Estás en la zona donde se vio a una mascota. ¡Mantente alerta!`,
+        data: { region },
+      },
+      trigger: null,
+    });
+  }
+});
 
 export default function App() {
+  const [isLoading, setIsLoading] = useState(true);
   const [location, setLocation] = useState(null);
   const [modalVisible, setModalVisible] = useState(false);
   const [petName, setPetName] = useState('');
   const [lostPets, setLostPets] = useState([]);
 
+  // Efecto para Geofencing y Alertas inmediatas
+  useEffect(() => {
+    const manejarAlertasYGeofencing = async () => {
+      const { status: authStatus } = await Notifications.requestPermissionsAsync();
+      const { status: bgStatus } = await Location.requestBackgroundPermissionsAsync();
+      
+      if (bgStatus === 'granted' && lostPets.length > 0) {
+        const regions = lostPets.map(pet => ({
+          identifier: pet.id,
+          latitude: pet.latitud,
+          longitude: pet.longitud,
+          radius: 5, 
+          notifyOnEnter: true,
+          notifyOnExit: false,
+        }));
+
+        await Location.startGeofencingAsync(GEOFENCING_TASK_NAME, regions);
+
+        // Lógica de notificación para nuevos reportes (Simulacro de Broadcast)
+        const ultimaMascota = lostPets[lostPets.length - 1];
+        const ahora = new Date().getTime();
+        const tiempoReporte = ultimaMascota.timestamp?.seconds * 1000;
+
+        if (tiempoReporte && (ahora - tiempoReporte < 10000)) { 
+          await Notifications.scheduleNotificationAsync({
+            content: {
+              title: "🚨 ¡ALERTA ENCONTRADOS!",
+              body: `Se acaba de reportar a ${ultimaMascota.nombre} cerca de tu posición.`,
+              data: { petId: ultimaMascota.id },
+            },
+            trigger: null,
+          });
+        }
+      }
+    };
+
+    manejarAlertasYGeofencing();
+  }, [lostPets]);
+
+  // Efecto para obtener ubicación inicial y escuchar Firebase
   useEffect(() => {
     (async () => {
       let { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== 'granted') return;
       let loc = await Location.getCurrentPositionAsync({});
       setLocation(loc);
+      setTimeout(() => {
+        setIsLoading(false);
+      }, 2000);
     })();
 
-    // ESCUCHAR MASCOTAS EN TIEMPO REAL
     const q = query(collection(db, "mascotas"));
     const unsubscribe = onSnapshot(q, (querySnapshot) => {
       const pets = [];
@@ -47,6 +120,10 @@ export default function App() {
     }
   };
 
+  if (isLoading) {
+    return <LoadingScreen />;
+  }
+
   return (
     <View style={styles.container}>
       {location && (
@@ -71,12 +148,10 @@ export default function App() {
         </MapView>
       )}
 
-      {/* BOTÓN FLOTANTE ESTILO POKEMON GO */}
       <TouchableOpacity style={styles.fab} onPress={() => setModalVisible(true)}>
         <Text style={styles.fabText}>+</Text>
       </TouchableOpacity>
 
-      {/* MODAL DE REPORTE */}
       <Modal visible={modalVisible} animationType="slide" transparent={true}>
         <View style={styles.modalContent}>
           <Text style={styles.modalTitle}>Reportar Mascota Perdida</Text>
