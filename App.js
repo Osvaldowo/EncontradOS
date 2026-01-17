@@ -4,6 +4,8 @@ import MapView, { Marker } from 'react-native-maps';
 import * as Location from 'expo-location';
 import * as Notifications from 'expo-notifications';
 import { supabase } from './supabaseConfig'; 
+import * as Device from 'expo-device'; // Importar para identificar el equipo
+
 
 // 1. Configuración de Notificaciones para que se vean SIEMPRE
 Notifications.setNotificationHandler({
@@ -19,8 +21,12 @@ export default function App() {
   const [modalVisible, setModalVisible] = useState(false);
   const [petName, setPetName] = useState('');
   const [lostPets, setLostPets] = useState([]);
+  const [deviceId, setDeviceId] = useState('');
 
   useEffect(() => {
+    // Obtener un ID único para este celular
+    const id = Device.osBuildId || Device.modelName || 'anonymous';
+    setDeviceId(id);
     (async () => {
       // Pedir permisos de GPS y Notificaciones al iniciar
       let { status: gpsStatus } = await Location.requestForegroundPermissionsAsync();
@@ -68,26 +74,52 @@ export default function App() {
   };
 
   const reportarMascota = async () => {
-    if (!petName || !location) return Alert.alert("Espera", "Escribe un nombre o descripción.");
+  if (!petName || !location) return Alert.alert("Error", "Faltan datos");
 
-    const { error } = await supabase
+  console.log("🔍 Verificando duplicados...");
+
+  try {
+    // 1. BUSCAR SI ESTE USUARIO YA REPORTÓ ESTE NOMBRE
+    const { data: existente, error: errorCheck } = await supabase
+      .from('mascotas')
+      .select('id')
+      .eq('nombre', petName)
+      .eq('user_id', deviceId); // Filtramos por el ID de este celular
+
+    if (errorCheck) throw errorCheck;
+
+    // 2. SI EXISTE, FRENAR EL PROCESO
+    if (existente && existente.length > 0) {
+      return Alert.alert(
+        "Reporte duplicado", 
+        "Ya has reportado a esta mascota anteriormente. No es necesario enviarlo de nuevo."
+      );
+    }
+
+    // 3. SI NO EXISTE, PROCEDER CON EL REGISTRO
+    const { error: errorInsert } = await supabase
       .from('mascotas')
       .insert([
         { 
           nombre: petName, 
           latitud: location.coords.latitude, 
-          longitud: location.coords.longitude 
+          longitud: location.coords.longitude,
+          user_id: deviceId // Guardamos quién lo reportó
         }
       ]);
 
-    if (error) {
-      Alert.alert("Error de conexión", error.message);
-    } else {
-      setModalVisible(false);
-      setPetName('');
-      Alert.alert("¡Enviado!", "Tu reporte ha sido compartido con la comunidad.");
-    }
-  };
+    if (errorInsert) throw errorInsert;
+
+    console.log("✅ Reporte único guardado");
+    setModalVisible(false);
+    setPetName('');
+    Alert.alert("¡Enviado!", "Tu reporte ha sido compartido.");
+
+  } catch (err) {
+    console.error(err);
+    Alert.alert("Error", "Hubo un problema al procesar el reporte.");
+  }
+};
 
   return (
     <View style={styles.container}>
