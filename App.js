@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { StyleSheet, View, Text, TouchableOpacity, Modal, TextInput, Button, Alert, Dimensions } from 'react-native';
+import { StyleSheet, View, Text, TouchableOpacity, Modal, TextInput, Button, Alert, Dimensions, Image, ActivityIndicator } from 'react-native';
 import MapView, { Marker, Circle } from 'react-native-maps';
 import * as Location from 'expo-location';
 import * as Notifications from 'expo-notifications';
@@ -16,6 +16,8 @@ Notifications.setNotificationHandler({
 });
 
 export default function App() {
+  // --- ESTADOS ---
+  const [appReady, setAppReady] = useState(false); 
   const [location, setLocation] = useState(null);
   const [modalVisible, setModalVisible] = useState(false);
   const [petName, setPetName] = useState('');
@@ -26,68 +28,76 @@ export default function App() {
   const notifiedPets = useRef(new Set());
 
   useEffect(() => {
-    // Identificador del dispositivo
-    const id = Device.osBuildId || Device.modelName || 'anonymous';
-    setDeviceId(id);
+    async function prepare() {
+      try {
+        // Identificador del dispositivo
+        const id = Device.osBuildId || Device.modelName || 'anonymous';
+        setDeviceId(id);
 
-    let locationSubscription;
+        // Pedir permisos
+        let { status: gpsStatus } = await Location.requestForegroundPermissionsAsync();
+        let { status: notifStatus } = await Notifications.requestPermissionsAsync();
+        
+        if (gpsStatus !== 'granted') {
+          Alert.alert("Permiso denegado", "Se necesita GPS para el mapa.");
+        } else {
+          // Obtener posición inicial
+          let loc = await Location.getCurrentPositionAsync({});
+          setLocation(loc);
 
-    (async () => {
-      // Pedir permisos
-      let { status: gpsStatus } = await Location.requestForegroundPermissionsAsync();
-      let { status: notifStatus } = await Notifications.requestPermissionsAsync();
-      
-      if (gpsStatus !== 'granted') {
-        Alert.alert("Permiso denegado", "Se necesita GPS para el mapa.");
-        return;
-      }
-
-      // Obtener posición inicial
-      let loc = await Location.getCurrentPositionAsync({});
-      setLocation(loc);
-
-      // RASTREO EN TIEMPO REAL: Verificar proximidad mientras el usuario camina
-      locationSubscription = await Location.watchPositionAsync(
-        {
-          accuracy: Location.Accuracy.High,
-          distanceInterval: 10, // Cada 10 metros detecta movimiento
-        },
-        (newLocation) => {
-          setLocation(newLocation);
-          verificarProximidad(newLocation, lostPets);
+          // RASTREO EN TIEMPO REAL
+          await Location.watchPositionAsync(
+            {
+              accuracy: Location.Accuracy.High,
+              distanceInterval: 10, 
+            },
+            (newLocation) => {
+              setLocation(newLocation);
+              // Verificar proximidad con la lista actual de mascotas
+              verificarProximidad(newLocation, lostPets);
+            }
+          );
         }
-      );
-    })();
 
-    fetchPets();
+        // Cargar datos iniciales
+        await fetchPets();
+        
+        // Delay para lucir tu logo
+        await new Promise(resolve => setTimeout(resolve, 2000)); 
 
-    // ESCUCHAR SUPABASE: Solo actualiza el mapa, la notificación la maneja el Geofencing
+      } catch (e) {
+        console.warn(e);
+      } finally {
+        setAppReady(true);
+      }
+    }
+
+    prepare();
+
+    // SUSCRIPCIÓN EN TIEMPO REAL
     const subscription = supabase
       .channel('public:mascotas')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'mascotas' }, payload => {
         setLostPets(current => {
           const updatedList = [payload.new, ...current];
-          // Si llega una nueva y estoy cerca, avisar de inmediato
+          // Si llega una nueva y estamos cerca, avisar de inmediato
           if (location) verificarProximidad(location, [payload.new]);
           return updatedList;
         });
       })
       .subscribe();
 
-    return () => {
-      if (locationSubscription) locationSubscription.remove();
-      supabase.removeChannel(subscription);
-    };
+    return () => supabase.removeChannel(subscription);
   }, [lostPets]);
 
   const fetchPets = async () => {
-    const { data, error } = await supabase.from('mascotas').select('*');
+    const { data } = await supabase.from('mascotas').select('*');
     if (data) setLostPets(data);
   };
 
-  // --- LÓGICA DE GEOCERCAS ---
+  // --- LÓGICA DE GEOCERCAS (200 metros) ---
   const calcularDistancia = (lat1, lon1, lat2, lon2) => {
-    const R = 6371e3; // Radio de la Tierra en metros
+    const R = 6371e3; 
     const dLat = (lat2 - lat1) * Math.PI / 180;
     const dLon = (lon2 - lon1) * Math.PI / 180;
     const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
@@ -98,7 +108,7 @@ export default function App() {
   };
 
   const verificarProximidad = (userLoc, petsArray) => {
-    const RADIUS = 200; // 200 metros
+    const RADIUS = 200; 
     petsArray.forEach(pet => {
       const dist = calcularDistancia(
         userLoc.coords.latitude, userLoc.coords.longitude,
@@ -118,7 +128,7 @@ export default function App() {
     });
   };
 
-  // --- LÓGICA DE REPORTE (CON VALIDACIÓN DE DUPLICADOS) ---
+  // --- REPORTE SIN DUPLICADOS ---
   const reportarMascota = async () => {
     if (!petName || !location) return Alert.alert("Error", "Faltan datos");
 
@@ -146,15 +156,30 @@ export default function App() {
 
       setModalVisible(false);
       setPetName('');
-      Alert.alert("¡Enviado!", "Reporte compartido.");
+      Alert.alert("¡Éxito!", "Reporte enviado.");
     } catch (err) {
       Alert.alert("Error", "No se pudo enviar el reporte.");
     }
   };
 
+  // --- RENDERIZADO DE PANTALLA DE CARGA ---
+  if (!appReady) {
+    return (
+      <View style={styles.splashContainer}>
+        <Image 
+          source={require('./assets/icono.jpg')} 
+          style={styles.splashLogo}
+          resizeMode="contain"
+        />
+        <ActivityIndicator size="large" color="#a5cc5d" style={{ marginTop: 20 }} />
+        <Text style={styles.splashText}>Cargando mapa...</Text>
+      </View>
+    );
+  }
+
   return (
     <View style={styles.container}>
-      {location ? (
+      {location && (
         <MapView 
           style={styles.map} 
           initialRegion={{
@@ -169,7 +194,7 @@ export default function App() {
             <React.Fragment key={pet.id}>
               <Marker 
                 coordinate={{ latitude: pet.latitud, longitude: pet.longitud }}
-                title={pet.nombre}
+                title={`¡${pet.nombre} perdido!`}
                 pinColor="red"
               />
               <Circle 
@@ -181,8 +206,6 @@ export default function App() {
             </React.Fragment>
           ))}
         </MapView>
-      ) : (
-        <View style={styles.loading}><Text>Localizando GPS...</Text></View>
       )}
 
       <TouchableOpacity style={styles.fab} onPress={() => setModalVisible(true)}>
@@ -194,11 +217,11 @@ export default function App() {
           <Text style={styles.modalTitle}>🐾 Reportar Mascota</Text>
           <TextInput 
             style={styles.input} 
-            placeholder="Nombre de la mascota" 
+            placeholder="Ej: Husky con collar azul" 
             value={petName}
             onChangeText={setPetName}
           />
-          <View style={{gap: 10}}>
+          <View style={{ gap: 10 }}>
             <Button title="Lanzar Alerta" onPress={reportarMascota} color="#ff4757" />
             <Button title="Cancelar" onPress={() => setModalVisible(false)} color="#2f3542" />
           </View>
@@ -210,8 +233,26 @@ export default function App() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#fff' },
-  map: { width: Dimensions.get('window').width, height: Dimensions.get('window').height },
-  loading: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  map: { width: '100%', height: '100%' },
+  // Estilos de la Pantalla de Carga
+  splashContainer: { 
+    flex: 1, 
+    backgroundColor: '#3d3430', 
+    justifyContent: 'center', 
+    alignItems: 'center' 
+  },
+  splashLogo: { 
+    width: 250, 
+    height: 250 
+  },
+  splashText: { 
+    color: '#fff', 
+    marginTop: 10, 
+    fontSize: 16, 
+    fontWeight: 'bold',
+    letterSpacing: 2
+  },
+  // Botones y Modales
   fab: { 
     position: 'absolute', bottom: 40, alignSelf: 'center', 
     backgroundColor: '#ff4757', width: 70, height: 70, borderRadius: 35, 
@@ -223,5 +264,5 @@ const styles = StyleSheet.create({
     padding: 30, borderRadius: 25, elevation: 20
   },
   modalTitle: { fontSize: 22, fontWeight: 'bold', marginBottom: 20, textAlign: 'center' },
-  input: { borderBottomWidth: 1, borderColor: '#ddd', marginBottom: 25, padding: 10, fontSize: 16 }
+  input: { borderBottomWidth: 1, borderColor: '#ddd', marginBottom: 25, padding: 10 }
 });
