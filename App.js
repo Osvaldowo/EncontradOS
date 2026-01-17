@@ -3,13 +3,67 @@ import { StyleSheet, View, Text, TouchableOpacity, Modal, TextInput, Button } fr
 import MapView, { Marker } from 'react-native-maps';
 import * as Location from 'expo-location';
 import { db } from './firebaseConfig'; 
-import { collection, addDoc, query, onSnapshot } from "firebase/firestore"; 
+import { collection, addDoc, query, onSnapshot } from "firebase/firestore";
+import * as TaskManager from 'expo-task-manager';
+import * as Notifications from 'expo-notifications';
+
+const GEOFENCING_TASK_NAME = 'ALERTA_MASCOTA_CERCANA';
+
+// CONFIGURAR CÓMO SE VEN LAS NOTIFICACIONES
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+  }),
+});
+
+// ESTA FUNCIÓN SE EJECUTA CUANDO ENTRAS EN UNA ZONA
+TaskManager.defineTask(GEOFENCING_TASK_NAME, ({ data: { eventType, region }, error }) => {
+  if (error) return;
+
+  if (eventType === Location.GeofencingEventType.Enter) {
+    Notifications.scheduleNotificationAsync({
+      content: {
+        title: "¡Mascota perdida cerca! 🐾",
+        body: `Estás en la zona donde se vio a una mascota. ¡Mantente alerta!`,
+        data: { region },
+      },
+      trigger: null, // Envío inmediato
+    });
+  }
+});
 
 export default function App() {
   const [location, setLocation] = useState(null);
   const [modalVisible, setModalVisible] = useState(false);
   const [petName, setPetName] = useState('');
   const [lostPets, setLostPets] = useState([]);
+
+  useEffect(() => {
+  const setupGeofencing = async () => {
+    // Pedir permisos de notificaciones y ubicación en segundo plano
+    const { status: authStatus } = await Notifications.requestPermissionsAsync();
+    const { status: bgStatus } = await Location.requestBackgroundPermissionsAsync();
+    
+    if (bgStatus === 'granted' && lostPets.length > 0) {
+      // Convertimos los perritos de Firebase en "Cercas" de 200 metros
+      const regions = lostPets.map(pet => ({
+        identifier: pet.id,
+        latitude: pet.latitud,
+        longitude: pet.longitud,
+        radius: 200, // Radio en metros
+        notifyOnEnter: true,
+        notifyOnExit: false,
+      }));
+
+      await Location.startGeofencingAsync(GEOFENCING_TASK_NAME, regions);
+      console.log("Geofencing activado para", regions.length, "mascotas");
+    }
+  };
+
+  setupGeofencing();
+}, [lostPets]); // Se actualiza cada vez que alguien sube una mascota nueva
 
   useEffect(() => {
     (async () => {
