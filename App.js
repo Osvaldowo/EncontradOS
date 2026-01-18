@@ -1,12 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { StyleSheet, View, Text, TouchableOpacity, Modal, TextInput, Button, Alert, Dimensions, Image, ActivityIndicator } from 'react-native';
+import { StyleSheet, View, Text, TouchableOpacity, Alert, Dimensions, Image, ActivityIndicator } from 'react-native';
 import MapView, { Marker, Circle } from 'react-native-maps';
 import * as Location from 'expo-location';
 import * as Notifications from 'expo-notifications';
 import { supabase } from './supabaseConfig'; 
-import * as Device from 'expo-device'; 
+import ReportModal from './ReportModal';
+import PetDetailModal from './PetDetailModal';
 
-// 1. Configuración de Notificaciones
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
     shouldShowAlert: true,
@@ -16,86 +16,79 @@ Notifications.setNotificationHandler({
 });
 
 export default function App() {
-  // --- ESTADOS ---
   const [appReady, setAppReady] = useState(false); 
   const [location, setLocation] = useState(null);
   const [modalVisible, setModalVisible] = useState(false);
-  const [petName, setPetName] = useState('');
   const [lostPets, setLostPets] = useState([]);
-  const [deviceId, setDeviceId] = useState('');
+  const [selectedPet, setSelectedPet] = useState(null);
+  const [detailVisible, setDetailVisible] = useState(false);
   
-  // Ref para no repetir notificaciones de la misma mascota en la misma sesión
+  // Usamos una Ref para la lista de mascotas para evitar que el GPS se reinicie cada vez que alguien sube un perro
+  const lostPetsRef = useRef([]);
   const notifiedPets = useRef(new Set());
 
+  // 1. CARGA INICIAL Y GPS (Solo corre una vez [])
   useEffect(() => {
     async function prepare() {
       try {
-        // Identificador del dispositivo
-        const id = Device.osBuildId || Device.modelName || 'anonymous';
-        setDeviceId(id);
-
-        // Pedir permisos
         let { status: gpsStatus } = await Location.requestForegroundPermissionsAsync();
-        let { status: notifStatus } = await Notifications.requestPermissionsAsync();
+        await Notifications.requestPermissionsAsync();
         
         if (gpsStatus !== 'granted') {
           Alert.alert("Permiso denegado", "Se necesita GPS para el mapa.");
         } else {
-          // Obtener posición inicial
           let loc = await Location.getCurrentPositionAsync({});
           setLocation(loc);
 
-          // RASTREO EN TIEMPO REAL
+          // RASTREO: Se configura una sola vez
           await Location.watchPositionAsync(
-            {
-              accuracy: Location.Accuracy.High,
-              distanceInterval: 10, 
-            },
+            { accuracy: Location.Accuracy.High, distanceInterval: 10 },
             (newLocation) => {
               setLocation(newLocation);
-              // Verificar proximidad con la lista actual de mascotas
-              verificarProximidad(newLocation, lostPets);
+              // Compara la ubicación nueva con la lista de mascotas guardada en la Ref
+              verificarProximidad(newLocation, lostPetsRef.current);
             }
           );
         }
 
-        // Cargar datos iniciales
         await fetchPets();
-        
-        // Delay para lucir tu logo
-        await new Promise(resolve => setTimeout(resolve, 2000)); 
+        setTimeout(() => setAppReady(true), 2000); 
 
       } catch (e) {
-        console.warn(e);
-      } finally {
+        console.warn("Error en prepare:", e);
         setAppReady(true);
       }
     }
 
     prepare();
 
-    // SUSCRIPCIÓN EN TIEMPO REAL
+    // 2. ESCUCHA DE SUPABASE (Solo una vez [])
     const subscription = supabase
       .channel('public:mascotas')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'mascotas' }, payload => {
+        const newPet = payload.new;
         setLostPets(current => {
-          const updatedList = [payload.new, ...current];
-          // Si llega una nueva y estamos cerca, avisar de inmediato
-          if (location) verificarProximidad(location, [payload.new]);
-          return updatedList;
+          const updated = [newPet, ...current];
+          lostPetsRef.current = updated; // Actualizamos la Ref para el GPS
+          return updated;
         });
+        
+        // Notificación inmediata si la nueva mascota está cerca
+        if (location) verificarProximidad(location, [newPet]);
       })
       .subscribe();
 
     return () => supabase.removeChannel(subscription);
-  }, [lostPets]);
+  }, []);
 
   const fetchPets = async () => {
     const { data } = await supabase.from('mascotas').select('*');
-    if (data) setLostPets(data);
+    if (data) {
+      setLostPets(data);
+      lostPetsRef.current = data;
+    }
   };
 
-  // --- LÓGICA DE GEOCERCAS (200 metros) ---
   const calcularDistancia = (lat1, lon1, lat2, lon2) => {
     const R = 6371e3; 
     const dLat = (lat2 - lat1) * Math.PI / 180;
@@ -110,6 +103,8 @@ export default function App() {
   const verificarProximidad = (userLoc, petsArray) => {
     const RADIUS = 200; 
     petsArray.forEach(pet => {
+      if (!pet.latitud || !pet.longitud) return;
+
       const dist = calcularDistancia(
         userLoc.coords.latitude, userLoc.coords.longitude,
         pet.latitud, pet.longitud
@@ -128,46 +123,12 @@ export default function App() {
     });
   };
 
-  // --- REPORTE SIN DUPLICADOS ---
-  const reportarMascota = async () => {
-    if (!petName || !location) return Alert.alert("Error", "Faltan datos");
-
-    try {
-      const { data: existente } = await supabase
-        .from('mascotas')
-        .select('id')
-        .eq('nombre', petName)
-        .eq('user_id', deviceId);
-
-      if (existente && existente.length > 0) {
-        return Alert.alert("Reporte duplicado", "Ya reportaste a esta mascota.");
-      }
-
-      const { error } = await supabase.from('mascotas').insert([
-        { 
-          nombre: petName, 
-          latitud: location.coords.latitude, 
-          longitud: location.coords.longitude,
-          user_id: deviceId 
-        }
-      ]);
-
-      if (error) throw error;
-
-      setModalVisible(false);
-      setPetName('');
-      Alert.alert("¡Éxito!", "Reporte enviado.");
-    } catch (err) {
-      Alert.alert("Error", "No se pudo enviar el reporte.");
-    }
-  };
-
-  // --- RENDERIZADO DE PANTALLA DE CARGA ---
   if (!appReady) {
     return (
       <View style={styles.splashContainer}>
+        {/* VERIFICA: ¿Tu logo se llama icono.png y está en assets? */}
         <Image 
-          source={require('./assets/icono.jpg')} 
+          source={require('./assets/icono.png')} 
           style={styles.splashLogo}
           resizeMode="contain"
         />
@@ -176,12 +137,13 @@ export default function App() {
       </View>
     );
   }
-
-  return (
+return (
     <View style={styles.container}>
+      {/* 1. MAPA SATELITAL (Capa de fondo) */}
       {location && (
         <MapView 
           style={styles.map} 
+          mapType="satellite" 
           initialRegion={{
             latitude: location.coords.latitude,
             longitude: location.coords.longitude,
@@ -192,49 +154,98 @@ export default function App() {
         >
           {lostPets.map(pet => (
             <React.Fragment key={pet.id}>
-              <Marker 
-                coordinate={{ latitude: pet.latitud, longitude: pet.longitud }}
-                title={`¡${pet.nombre} perdido!`}
-                pinColor="red"
-              />
-              <Circle 
-                center={{ latitude: pet.latitud, longitude: pet.longitud }}
-                radius={200}
-                fillColor="rgba(255, 0, 0, 0.2)"
-                strokeColor="rgba(255, 0, 0, 0.5)"
-              />
+              {pet.latitud && pet.longitud && (
+                <>
+                  {/* MARCADOR INTERACTIVO */}
+                  <Marker 
+                    coordinate={{ latitude: pet.latitud, longitude: pet.longitud }}
+                    onPress={() => {
+                      setSelectedPet(pet);    
+                      setDetailVisible(true); 
+                    }}      
+                  >
+                    <Image 
+                      source={require('./assets/pin-red.png')} 
+                      style={{ width: 45, height: 45 }} 
+                      resizeMode="contain" 
+                    />  
+                  </Marker>
+
+                  {/* CÍRCULO DE PROXIMIDAD */}
+                  <Circle 
+                    center={{ latitude: pet.latitud, longitude: pet.longitud }}
+                    radius={200}
+                    fillColor="rgba(255, 0, 0, 0.2)"
+                    strokeColor="rgba(255, 0, 0, 0.5)"
+                  />
+                </>
+              )}
             </React.Fragment>
           ))}
         </MapView>
       )}
 
-      <TouchableOpacity style={styles.fab} onPress={() => setModalVisible(true)}>
+      {/* 2. BOTÓN FLOTANTE "+" (Único punto de acción) */}
+      <TouchableOpacity 
+        style={styles.fab} 
+        onPress={() => setModalVisible(true)}
+      >
         <Text style={styles.fabText}>+</Text>
       </TouchableOpacity>
 
-      <Modal visible={modalVisible} animationType="slide" transparent={true}>
-        <View style={styles.modalContent}>
-          <Text style={styles.modalTitle}>🐾 Reportar Mascota</Text>
-          <TextInput 
-            style={styles.input} 
-            placeholder="Ej: Husky con collar azul" 
-            value={petName}
-            onChangeText={setPetName}
-          />
-          <View style={{ gap: 10 }}>
-            <Button title="Lanzar Alerta" onPress={reportarMascota} color="#ff4757" />
-            <Button title="Cancelar" onPress={() => setModalVisible(false)} color="#2f3542" />
-          </View>
-        </View>
-      </Modal>
+      {/* 3. MODALES DE FUNCIONALIDAD */}
+      
+      {/* Modal para CREAR reporte (con foto de galería) */}
+      <ReportModal 
+        visible={modalVisible} 
+        onClose={() => setModalVisible(false)} 
+        userLocation={location} 
+      />
+
+      {/* Modal para VER detalles (al tocar un pin) */}
+      <PetDetailModal 
+        visible={detailVisible} 
+        pet={selectedPet} 
+        onClose={() => setDetailVisible(false)} 
+      />
     </View>
   );
 }
 
+// ESTILOS LIMPIOS
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#fff' },
-  map: { width: '100%', height: '100%' },
-  // Estilos de la Pantalla de Carga
+  container: { 
+    flex: 1, 
+    backgroundColor: '#3d3430' 
+  },
+  map: { 
+    width: '100%', 
+    height: '100%' 
+  },
+  fab: { 
+    position: 'absolute', 
+    bottom: 50, // Elevado un poco para que sea cómodo al pulgar
+    alignSelf: 'center', 
+    backgroundColor: '#ff4757', // Rojo vibrante para resaltar
+    width: 80, 
+    height: 80, 
+    borderRadius: 40, 
+    justifyContent: 'center', 
+    alignItems: 'center', 
+    elevation: 10,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 5,
+    borderWidth: 3,
+    borderColor: '#fff' // Borde blanco para que resalte sobre el mapa satelital
+  },
+  fabText: { 
+    color: 'white', 
+    fontSize: 40, 
+    fontWeight: 'bold',
+    lineHeight: 45
+  },
   splashContainer: { 
     flex: 1, 
     backgroundColor: '#3d3430', 
@@ -250,19 +261,6 @@ const styles = StyleSheet.create({
     marginTop: 10, 
     fontSize: 16, 
     fontWeight: 'bold',
-    letterSpacing: 2
-  },
-  // Botones y Modales
-  fab: { 
-    position: 'absolute', bottom: 40, alignSelf: 'center', 
-    backgroundColor: '#ff4757', width: 70, height: 70, borderRadius: 35, 
-    justifyContent: 'center', alignItems: 'center', elevation: 8
-  },
-  fabText: { color: 'white', fontSize: 35, fontWeight: 'bold' },
-  modalContent: { 
-    marginTop: '50%', marginHorizontal: 20, backgroundColor: 'white', 
-    padding: 30, borderRadius: 25, elevation: 20
-  },
-  modalTitle: { fontSize: 22, fontWeight: 'bold', marginBottom: 20, textAlign: 'center' },
-  input: { borderBottomWidth: 1, borderColor: '#ddd', marginBottom: 25, padding: 10 }
+    letterSpacing: 2 
+  }
 });
