@@ -1,16 +1,21 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { StyleSheet, View, Text, TouchableOpacity, Modal, TextInput, Button, Alert, Dimensions, Image, ActivityIndicator, FlatList, ScrollView, Linking } from 'react-native';
+import { StyleSheet, View, Text, TouchableOpacity, Alert, Image, ActivityIndicator, FlatList, Modal } from 'react-native';
 import MapView, { Marker, Circle } from 'react-native-maps';
 import * as Location from 'expo-location';
 import * as Notifications from 'expo-notifications';
-import { supabase } from './supabaseConfig'; 
-import * as Device from 'expo-device'; 
+import * as Device from 'expo-device';
 import * as ImagePicker from 'expo-image-picker';
+import { supabase } from './supabaseConfig'; 
 
-// Importamos las funciones necesarias de tu biblioteca
-import { cargarMapa, abrirGestionMascotas, ejecutarEliminacion, seleccionarImagenDeGaleria, registrarMascota } from './backend';
+// Importación de Componentes de UI (Merge Front-end)
+import ReportModal from './ReportModal';
+import PetDetailModal from './PetDetailModal';
+import { COLORS, THEME, MAP_STYLE } from './Theme';
 
-// 1. Configuración de Notificaciones (Actualizada para evitar warnings)
+// Importación de Lógica (Separación de Capas)
+import { cargarMapa, abrirGestionMascotas, ejecutarEliminacion } from './backend';
+
+// Configuración de Notificaciones actualizada
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
     shouldShowBanner: true, 
@@ -21,61 +26,56 @@ Notifications.setNotificationHandler({
 });
 
 export default function App() {
+  // --- ESTADOS DE LA APP ---
   const [appReady, setAppReady] = useState(false); 
   const [location, setLocation] = useState(null);
-  const [modalVisible, setModalVisible] = useState(false);
-  const [lostPets, setLostPets] = useState([]);
   const [deviceId, setDeviceId] = useState('');
-  const [drawerVisible, setDrawerVisible] = useState(false);
-  const [userPets, setUserPets] = useState([]);
   
-  // --- ESTADOS PARA DETALLES ---
+  // --- ESTADOS DE MODALES ---
+  const [modalVisible, setModalVisible] = useState(false); // Reporte
+  const [detailVisible, setDetailVisible] = useState(false); // Ficha Mascota
+  const [drawerVisible, setDrawerVisible] = useState(false); // Mis Alertas
+  
+  // --- ESTADOS DE DATOS ---
+  const [lostPets, setLostPets] = useState([]);
   const [selectedPet, setSelectedPet] = useState(null);
-  const [detailVisible, setDetailVisible] = useState(false);
-  
-  // --- ESTADOS DEL FORMULARIO ---
-  const [petName, setPetName] = useState('');
-  const [petContact, setPetContact] = useState('');
-  const [petDescription, setPetDescription] = useState('');
-  const [selectedImage, setSelectedImage] = useState(null);
+  const [userPets, setUserPets] = useState([]);
 
+  const lostPetsRef = useRef([]); // Referencia para el tracker de GPS
   const notifiedPets = useRef(new Set());
 
-  // 1. CARGA INICIAL Y GPS (Solo corre una vez [])
   useEffect(() => {
     async function prepare() {
       try {
-        await cargarMapa(setLostPets);
-
+        // 1. Identificador único del dispositivo
         const id = Device.osBuildId || Device.modelName || 'anonymous';
         setDeviceId(id);
 
+        // 2. Gestión de Permisos (GPS, Notif, Galería)
         let { status: gpsStatus } = await Location.requestForegroundPermissionsAsync();
-        let { status: notifStatus } = await Notifications.requestPermissionsAsync();
-        let { status: galleryStatus } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-
-        if (gpsStatus !== 'granted') {
-          Alert.alert("Permiso denegado", "Se necesita GPS para el mapa.");
-        }
+        await Notifications.requestPermissionsAsync();
+        await ImagePicker.requestMediaLibraryPermissionsAsync();
         
-        if (galleryStatus !== 'granted') {
-          Alert.alert("Permiso necesario", "Necesitamos acceso a tus fotos para poder reportar.");
-        }
-
-        if (gpsStatus === 'granted') {
+        if (gpsStatus !== 'granted') {
+          Alert.alert("Acceso Denegado", "Se necesita GPS para el funcionamiento del radar.");
+        } else {
+          // Posición inicial
           let loc = await Location.getCurrentPositionAsync({});
           setLocation(loc);
 
+          // RASTREO EN TIEMPO REAL (Geocerca de 200m)
           await Location.watchPositionAsync(
             { accuracy: Location.Accuracy.High, distanceInterval: 10 },
             (newLocation) => {
               setLocation(newLocation);
-              verificarProximidad(newLocation, lostPets);
+              verificarProximidad(newLocation, lostPetsRef.current);
             }
           );
         }
-        
-        await new Promise(resolve => setTimeout(resolve, 2000)); 
+
+        await fetchAndSetPets(); // Carga inicial desde Supabase
+        setTimeout(() => setAppReady(true), 2000); // Splash timing
+
       } catch (e) {
         console.warn("Error en prepare:", e);
         setAppReady(true);
@@ -83,17 +83,16 @@ export default function App() {
     }
     prepare();
 
+    // 3. SUSCRIPCIÓN EN TIEMPO REAL (Supabase Realtime)
     const subscription = supabase
       .channel('public:mascotas')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'mascotas' }, payload => {
         const newPet = payload.new;
         setLostPets(current => {
-          const updatedList = [payload.new, ...current];
-          if (location) verificarProximidad(location, [payload.new]);
-          return updatedList;
+          const updated = [newPet, ...current];
+          lostPetsRef.current = updated;
+          return updated;
         });
-        
-        // Notificación inmediata si la nueva mascota está cerca
         if (location) verificarProximidad(location, [newPet]);
       })
       .subscribe();
@@ -101,62 +100,14 @@ export default function App() {
     return () => supabase.removeChannel(subscription);
   }, []);
 
-  // --- FUNCIONES DE LA BIBLIOTECA ---
-  const toggleMisReportes = () => abrirGestionMascotas(deviceId, setUserPets, setDrawerVisible);
-  const handleBorrar = (id) => ejecutarEliminacion(id, userPets, setUserPets, () => cargarMapa(setLostPets));
-
-  const handleSeleccionarImagen = async () => {
-    const imagen = await seleccionarImagenDeGaleria();
-    if (imagen) setSelectedImage(imagen);
+  // --- LÓGICA DE DATOS ---
+  const fetchAndSetPets = async () => {
+    await cargarMapa((data) => {
+      setLostPets(data);
+      lostPetsRef.current = data;
+    });
   };
 
-  // Función para abrir la ficha de detalle
-  const verDetalle = (pet) => {
-    setSelectedPet(pet);
-    setDetailVisible(true);
-  };
-
-  // Función para llamar al dueño
-  const llamarDuenio = (numero) => {
-    if (!numero) return Alert.alert("Error", "No hay número de contacto.");
-    Linking.openURL(`tel:${numero}`);
-  };
-
-  const handleReportar = async () => {
-    if (!petName || !petContact || !location) {
-      return Alert.alert("Faltan datos", "Por favor ingresa nombre y número de contacto.");
-    }
-
-    try {
-      setAppReady(false);
-      await registrarMascota({
-        nombre: petName,
-        contacto: petContact,
-        descripcion: petDescription,
-        imagenData: selectedImage,
-        latitud: location.coords.latitude,
-        longitud: location.coords.longitude,
-        deviceId: deviceId
-      });
-
-      setModalVisible(false);
-      resetForm();
-      Alert.alert("¡Éxito!", "Mascota reportada correctamente.");
-    } catch (err) {
-      Alert.alert("Error", err.message === "DUPLICADO" ? "Ya reportaste a esta mascota." : "No se pudo enviar.");
-    } finally {
-      setAppReady(true);
-    }
-  };
-
-  const resetForm = () => {
-    setPetName('');
-    setPetContact('');
-    setPetDescription('');
-    setSelectedImage(null);
-  };
-
-  // --- LÓGICA DE GEOCERCAS ---
   const calcularDistancia = (lat1, lon1, lat2, lon2) => {
     const R = 6371e3; 
     const dLat = (lat2 - lat1) * Math.PI / 180;
@@ -165,16 +116,17 @@ export default function App() {
               Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
               Math.sin(dLon/2) * Math.sin(dLon/2);
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-    return R * c;
+    return R * c; // Distancia en metros
   };
 
   const verificarProximidad = (userLoc, petsArray) => {
     const RADIUS = 200; 
     petsArray.forEach(pet => {
+      if (!pet.latitud || !pet.longitud) return;
       const dist = calcularDistancia(userLoc.coords.latitude, userLoc.coords.longitude, pet.latitud, pet.longitud);
       if (dist <= RADIUS && !notifiedPets.current.has(pet.id)) {
         Notifications.scheduleNotificationAsync({
-          content: { title: "🐾 ¡Mascota Cerca!", body: `Entraste al perímetro de ${pet.nombre}. ¡Mantente alerta!` },
+          content: { title: "🐾 ¡Mascota Cerca!", body: `Entraste al área de búsqueda de ${pet.nombre}.` },
           trigger: null,
         });
         notifiedPets.current.add(pet.id);
@@ -182,25 +134,33 @@ export default function App() {
     });
   };
 
+  // --- RENDER SPLASH ---
   if (!appReady) {
     return (
       <View style={styles.splashContainer}>
         <Image source={require('./assets/icono.png')} style={styles.splashLogo} resizeMode="contain" />
-        <ActivityIndicator size="large" color="#a5cc5d" style={{ marginTop: 20 }} />
-        <Text style={styles.splashText}>Procesando...</Text>
+        <ActivityIndicator size="large" color={COLORS.accentGreen} style={{ marginTop: 20 }} />
+        <Text style={styles.splashText}>INICIALIZANDO RADAR...</Text>
       </View>
     );
   }
-return (
+
+  // --- RENDER MAPA Y UI ---
+  return (
     <View style={styles.container}>
-      <TouchableOpacity style={styles.menuButton} onPress={toggleMisReportes}>
-        <Text style={styles.menuIconText}>☰</Text>
+      {/* Botón de Gestión de Reportes Propios */}
+      <TouchableOpacity 
+        style={styles.menuBtn} 
+        onPress={() => abrirGestionMascotas(deviceId, setUserPets, setDrawerVisible)}
+      >
+        <Text style={{ fontSize: 24 }}>📜</Text>
       </TouchableOpacity>
 
       {location && (
         <MapView 
           style={styles.map} 
           mapType="satellite" 
+          customMapStyle={MAP_STYLE}
           initialRegion={{
             latitude: location.coords.latitude,
             longitude: location.coords.longitude,
@@ -213,15 +173,16 @@ return (
             pet.latitud && pet.longitud && (
               <React.Fragment key={pet.id}>
                 <Marker 
-                  coordinate={{ latitude: pet.latitud, longitude: pet.longitud }} 
-                  pinColor="red"
-                  onPress={() => verDetalle(pet)} // Al tocar el pin, abre la ficha
-                />
+                  coordinate={{ latitude: pet.latitud, longitude: pet.longitud }}
+                  onPress={() => { setSelectedPet(pet); setDetailVisible(true); }}      
+                >
+                  <Image source={require('./assets/pin-red.png')} style={{ width: 40, height: 40 }} resizeMode="contain" />  
+                </Marker>
                 <Circle 
-                  center={{ latitude: pet.latitud, longitude: pet.longitud }} 
-                  radius={200} 
-                  fillColor="rgba(255, 0, 0, 0.1)" 
-                  strokeColor="rgba(255, 0, 0, 0.3)" 
+                  center={{ latitude: pet.latitud, longitude: pet.longitud }}
+                  radius={200}
+                  fillColor="rgba(164, 198, 57, 0.2)"
+                  strokeColor={COLORS.accentGreen}
                 />
               </React.Fragment>
             )
@@ -229,131 +190,63 @@ return (
         </MapView>
       )}
 
-      {/* 2. BOTÓN FLOTANTE "+" (Único punto de acción) */}
-      <TouchableOpacity 
-        style={styles.fab} 
-        onPress={() => setModalVisible(true)}
-      >
+      {/* Botón Principal "+" */}
+      <TouchableOpacity style={styles.fab} onPress={() => setModalVisible(true)}>
         <Text style={styles.fabText}>+</Text>
       </TouchableOpacity>
 
-      {/* MODAL DE DETALLE DE MASCOTA (FICHA) */}
-      <Modal visible={detailVisible} animationType="slide" transparent={true}>
-        <View style={styles.detailOverlay}>
-          <View style={styles.detailContainer}>
-            {selectedPet && (
-              <>
-                <Text style={styles.detailTitle}>🚨 ¡Mascota Localizada!</Text>
-                
-                {selectedPet.imagen_url ? (
-                  <Image source={{ uri: selectedPet.imagen_url }} style={styles.detailImage} />
-                ) : (
-                  <View style={[styles.detailImage, {backgroundColor: '#f1f2f6', justifyContent: 'center', alignItems: 'center'}]}>
-                    <Text>Sin foto disponible</Text>
-                  </View>
-                )}
+      {/* MODALES EXTERNOS (FRONT-END MERGE) */}
+      <ReportModal 
+        visible={modalVisible} 
+        onClose={() => setModalVisible(false)} 
+        userLocation={location} 
+        deviceId={deviceId} 
+        onRefresh={fetchAndSetPets} 
+      />
+      <PetDetailModal 
+        visible={detailVisible} 
+        pet={selectedPet} 
+        onClose={() => setDetailVisible(false)} 
+      />
 
-                <Text style={styles.petNameText}>{selectedPet.nombre}</Text>
-                <Text style={styles.petDescText}>{selectedPet.descripcion || "Sin descripción adicional."}</Text>
-                
-                <TouchableOpacity 
-                  style={styles.callButton} 
-                  onPress={() => llamarDuenio(selectedPet.contacto)}
-                >
-                  <Text style={styles.callButtonText}>📞 Llamar al dueño</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity style={styles.closeBtn} onPress={() => setDetailVisible(false)}>
-                  <Text style={styles.closeBtnText}>Cerrar</Text>
-                </TouchableOpacity>
-              </>
-            )}
-          </View>
-        </View>
-      </Modal>
-
-      {/* MODAL DE REPORTE */}
-      <Modal visible={modalVisible} animationType="slide" transparent={true}>
-        <View style={styles.modalOverlay}>
-          <ScrollView contentContainerStyle={styles.modalContent}>
-            <Text style={styles.modalTitle}>🐾 Reportar Mascota</Text>
-            
-            <TextInput style={styles.input} placeholder="Nombre de la mascota" value={petName} onChangeText={setPetName} />
-            <TextInput style={styles.input} placeholder="Teléfono de contacto" keyboardType="phone-pad" value={petContact} onChangeText={setPetContact} />
-            <TextInput style={[styles.input, {height: 80}]} placeholder="Descripción (color, collar, etc.)" multiline value={petDescription} onChangeText={setPetDescription} />
-            
-            <TouchableOpacity style={styles.imageButton} onPress={handleSeleccionarImagen}>
-              <Text style={styles.imageButtonText}>{selectedImage ? "✅ Foto seleccionada" : "📸 Elegir de Galería"}</Text>
-            </TouchableOpacity>
-
-            <View style={{ gap: 10, marginTop: 10 }}>
-              <Button title="Lanzar Alerta" onPress={handleReportar} color="#ff4757" />
-              <Button title="Cancelar" onPress={() => { setModalVisible(false); resetForm(); }} color="#2f3542" />
-            </View>
-          </ScrollView>
-        </View>
-      </Modal>
-
-      {/* MODAL SLIDE LATERAL */}
-      <Modal visible={drawerVisible} animationType="slide" transparent={true}>
+      {/* GESTIÓN DE MIS ALERTAS (Estética RPG) */}
+      <Modal visible={drawerVisible} animationType="fade" transparent={true}>
         <View style={styles.drawerOverlay}>
-          <View style={styles.drawerContainer}>
-            <Text style={styles.drawerTitle}>Mis Reportes</Text>
+          <View style={[THEME.infoCard, styles.drawerContent]}>
+            <Text style={THEME.headerTitle}>MIS ALERTAS</Text>
             <FlatList
               data={userPets}
               keyExtractor={(item) => item.id.toString()}
               renderItem={({ item }) => (
                 <View style={styles.petItem}>
                   <Text style={styles.petItemName}>{item.nombre}</Text>
-                  <TouchableOpacity onPress={() => handleBorrar(item.id)}>
-                    <Text style={{fontSize: 24}}>🗑️</Text>
+                  <TouchableOpacity onPress={() => ejecutarEliminacion(item.id, userPets, setUserPets, fetchAndSetPets)}>
+                    <Text style={{fontSize: 20}}>🗑️</Text>
                   </TouchableOpacity>
                 </View>
               )}
             />
-            <Button title="Cerrar" onPress={() => setDrawerVisible(false)} color="#3d3430" />
+            <TouchableOpacity style={THEME.rpgButton} onPress={() => setDrawerVisible(false)}>
+              <Text style={{color: '#FFF', fontFamily: 'monospace'}}>CERRAR</Text>
+            </TouchableOpacity>
           </View>
-          <TouchableOpacity style={{flex: 1}} onPress={() => setDrawerVisible(false)} />
         </View>
       </Modal>
     </View>
   );
 }
 
-// ESTILOS LIMPIOS
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#fff' },
+  container: { flex: 1, backgroundColor: COLORS.bgDark },
   map: { width: '100%', height: '100%' },
-  splashContainer: { flex: 1, backgroundColor: '#3d3430', justifyContent: 'center', alignItems: 'center' },
-  splashLogo: { width: 200, height: 200 },
-  splashText: { color: '#fff', marginTop: 10, fontSize: 16, fontWeight: 'bold' },
-  fab: { position: 'absolute', bottom: 40, alignSelf: 'center', backgroundColor: '#ff4757', width: 70, height: 70, borderRadius: 35, justifyContent: 'center', alignItems: 'center', elevation: 8 },
-  fabText: { color: 'white', fontSize: 35, fontWeight: 'bold' },
-  menuButton: { position: 'absolute', top: 50, left: 20, zIndex: 10, backgroundColor: '#fff', width: 50, height: 50, borderRadius: 25, justifyContent: 'center', alignItems: 'center', elevation: 5 },
-  menuIconText: { fontSize: 24, color: '#3d3430' },
-  
-  // ESTILOS DE LA FICHA DE DETALLES
-  detailOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },
-  detailContainer: { backgroundColor: 'white', borderTopLeftRadius: 30, borderTopRightRadius: 30, padding: 25, alignItems: 'center', elevation: 20 },
-  detailTitle: { fontSize: 18, fontWeight: 'bold', color: '#ff4757', marginBottom: 15 },
-  detailImage: { width: '100%', height: 200, borderRadius: 20, marginBottom: 15 },
-  petNameText: { fontSize: 24, fontWeight: 'bold', color: '#2f3542' },
-  petDescText: { fontSize: 16, color: '#57606f', textAlign: 'center', marginVertical: 10 },
-  callButton: { backgroundColor: '#2ed573', padding: 15, borderRadius: 15, width: '100%', alignItems: 'center', marginTop: 10 },
-  callButtonText: { color: 'white', fontWeight: 'bold', fontSize: 16 },
-  closeBtn: { marginTop: 15, padding: 10 },
-  closeBtnText: { color: '#a4b0be', fontWeight: 'bold' },
-
-  // OTROS ESTILOS
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center' },
-  modalContent: { marginHorizontal: 20, backgroundColor: 'white', padding: 25, borderRadius: 25, elevation: 20 },
-  modalTitle: { fontSize: 22, fontWeight: 'bold', marginBottom: 20, textAlign: 'center' },
-  input: { borderBottomWidth: 1, borderColor: '#ddd', marginBottom: 15, padding: 10, fontSize: 16 },
-  imageButton: { backgroundColor: '#f1f2f6', padding: 15, borderRadius: 10, marginBottom: 20, alignItems: 'center', borderStyle: 'dashed', borderWidth: 1, borderColor: '#a4b0be' },
-  imageButtonText: { color: '#2f3542', fontWeight: 'bold' },
-  drawerOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', flexDirection: 'row' },
-  drawerContainer: { width: '80%', backgroundColor: '#fff', height: '100%', padding: 25, paddingTop: 60 },
-  drawerTitle: { fontSize: 24, fontWeight: 'bold', marginBottom: 20, color: '#3d3430' },
-  petItem: { flexDirection: 'row', justifyContent: 'space-between', padding: 15, borderBottomWidth: 1, borderBottomColor: '#eee' },
-  petItemName: { fontSize: 16, color: '#333' }
+  menuBtn: { position: 'absolute', top: 50, left: 20, zIndex: 10, backgroundColor: COLORS.parchmentDark, padding: 10, borderRadius: 10, borderWidth: 2, borderColor: COLORS.borderDark, elevation: 5 },
+  fab: { position: 'absolute', bottom: 40, alignSelf: 'center', backgroundColor: '#ff4757', width: 75, height: 75, borderRadius: 40, justifyContent: 'center', alignItems: 'center', elevation: 10, borderWidth: 3, borderColor: '#fff' },
+  fabText: { color: 'white', fontSize: 40, fontWeight: 'bold' },
+  splashContainer: { flex: 1, backgroundColor: COLORS.bgDark, justifyContent: 'center', alignItems: 'center' },
+  splashLogo: { width: 220, height: 220 },
+  splashText: { color: '#fff', marginTop: 15, fontFamily: 'monospace', fontWeight: 'bold' },
+  drawerOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.85)', justifyContent: 'center', alignItems: 'center' },
+  drawerContent: { width: '85%', maxHeight: '70%' },
+  petItem: { flexDirection: 'row', justifyContent: 'space-between', padding: 15, borderBottomWidth: 1, borderColor: COLORS.parchmentDark },
+  petItemName: { fontFamily: 'monospace', fontSize: 16 }
 });

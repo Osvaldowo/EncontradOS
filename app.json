@@ -4,9 +4,13 @@
     "slug": "EncontradOS",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
+    "icon": "./assets/icono.png",
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
+    "updates": {
+      "enabled": false,
+      "checkAutomatically": "NEVER"
+    },
     "splash": {
       "image": "./assets/icono.png",
       "resizeMode": "contain",
@@ -21,7 +25,10 @@
           "fetch",
           "remote-notification"
         ],
-        "NSPhotoLibraryUsageDescription": "Esta aplicación necesita acceder a tus fotos para reportar mascotas perdidas."
+        "NSPhotoLibraryUsageDescription": "Esta aplicación necesita acceder a tus fotos para reportar mascotas perdidas.",
+        "NSCameraUsageDescription": "Esta aplicación necesita usar la cámara para capturar fotos de las mascotas al momento del reporte.",
+        "NSLocationWhenInUseUsageDescription": "Usamos tu ubicación para mostrarte las mascotas perdidas cerca de ti.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "Necesitamos tu ubicación para avisarte si una mascota perdida está en tu zona de búsqueda."
       }
     },
     "android": {
@@ -40,13 +47,25 @@
       [
         "expo-image-picker",
         {
-          "photosPermission": "La aplicación necesita acceder a tus fotos para reportar mascotas perdidas."
+          "photosPermission": "La aplicación necesita acceder a tus fotos para reportar mascotas perdidas.",
+          "cameraPermission": "La aplicación necesita acceso a la cámara para reportar mascotas perdidas."
         }
       ],
-      "expo-location"
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Permite que EncontradOS use el GPS para el radar de búsqueda."
+        }
+      ],
+      "expo-notifications"
     ],
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "1392527a-75b8-41d9-aa6d-93921d8f77a3"
+      }
     }
   }
 }
