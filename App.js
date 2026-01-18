@@ -21,7 +21,6 @@ Notifications.setNotificationHandler({
 });
 
 export default function App() {
-  // --- ESTADOS ---
   const [appReady, setAppReady] = useState(false); 
   const [location, setLocation] = useState(null);
   const [modalVisible, setModalVisible] = useState(false);
@@ -42,6 +41,7 @@ export default function App() {
 
   const notifiedPets = useRef(new Set());
 
+  // 1. CARGA INICIAL Y GPS (Solo corre una vez [])
   useEffect(() => {
     async function prepare() {
       try {
@@ -77,8 +77,7 @@ export default function App() {
         
         await new Promise(resolve => setTimeout(resolve, 2000)); 
       } catch (e) {
-        console.warn(e);
-      } finally {
+        console.warn("Error en prepare:", e);
         setAppReady(true);
       }
     }
@@ -87,16 +86,20 @@ export default function App() {
     const subscription = supabase
       .channel('public:mascotas')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'mascotas' }, payload => {
+        const newPet = payload.new;
         setLostPets(current => {
           const updatedList = [payload.new, ...current];
           if (location) verificarProximidad(location, [payload.new]);
           return updatedList;
         });
+        
+        // Notificación inmediata si la nueva mascota está cerca
+        if (location) verificarProximidad(location, [newPet]);
       })
       .subscribe();
 
     return () => supabase.removeChannel(subscription);
-  }, [lostPets]);
+  }, []);
 
   // --- FUNCIONES DE LA BIBLIOTECA ---
   const toggleMisReportes = () => abrirGestionMascotas(deviceId, setUserPets, setDrawerVisible);
@@ -188,8 +191,7 @@ export default function App() {
       </View>
     );
   }
-
-  return (
+return (
     <View style={styles.container}>
       <TouchableOpacity style={styles.menuButton} onPress={toggleMisReportes}>
         <Text style={styles.menuIconText}>☰</Text>
@@ -198,6 +200,7 @@ export default function App() {
       {location && (
         <MapView 
           style={styles.map} 
+          mapType="satellite" 
           initialRegion={{
             latitude: location.coords.latitude,
             longitude: location.coords.longitude,
@@ -226,7 +229,11 @@ export default function App() {
         </MapView>
       )}
 
-      <TouchableOpacity style={styles.fab} onPress={() => setModalVisible(true)}>
+      {/* 2. BOTÓN FLOTANTE "+" (Único punto de acción) */}
+      <TouchableOpacity 
+        style={styles.fab} 
+        onPress={() => setModalVisible(true)}
+      >
         <Text style={styles.fabText}>+</Text>
       </TouchableOpacity>
 
@@ -313,6 +320,7 @@ export default function App() {
   );
 }
 
+// ESTILOS LIMPIOS
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#fff' },
   map: { width: '100%', height: '100%' },
