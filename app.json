@@ -10,13 +10,18 @@
     "splash": {
       "image": "./assets/icono.png",
       "resizeMode": "contain",
-      "backgroundColor": "#3d352d" 
+      "backgroundColor": "#3d352d"
     },
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.tuquipo.encontrados",
       "infoPlist": {
-        "UIBackgroundModes": ["location", "fetch", "remote-notification"]
+        "UIBackgroundModes": [
+          "location",
+          "fetch",
+          "remote-notification"
+        ],
+        "NSPhotoLibraryUsageDescription": "Esta aplicación necesita acceder a tus fotos para reportar mascotas perdidas."
       }
     },
     "android": {
@@ -25,9 +30,21 @@
         "ACCESS_FINE_LOCATION",
         "ACCESS_COARSE_LOCATION",
         "ACCESS_BACKGROUND_LOCATION",
-        "FOREGROUND_SERVICE"
+        "FOREGROUND_SERVICE",
+        "READ_EXTERNAL_STORAGE",
+        "WRITE_EXTERNAL_STORAGE",
+        "CAMERA"
       ]
     },
+    "plugins": [
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "La aplicación necesita acceder a tus fotos para reportar mascotas perdidas."
+        }
+      ],
+      "expo-location"
+    ],
     "web": {
       "favicon": "./assets/favicon.png"
     }

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { StyleSheet, View, Text, TouchableOpacity, Modal, TextInput, Button, Alert, Dimensions, Image, ActivityIndicator, FlatList, ScrollView } from 'react-native';
+import { StyleSheet, View, Text, TouchableOpacity, Modal, TextInput, Button, Alert, Dimensions, Image, ActivityIndicator, FlatList, ScrollView, Linking } from 'react-native';
 import MapView, { Marker, Circle } from 'react-native-maps';
 import * as Location from 'expo-location';
 import * as Notifications from 'expo-notifications';
@@ -10,9 +10,11 @@ import * as ImagePicker from 'expo-image-picker';
 // Importamos las funciones necesarias de tu biblioteca
 import { cargarMapa, abrirGestionMascotas, ejecutarEliminacion, seleccionarImagenDeGaleria, registrarMascota } from './backend';
 
+// 1. Configuración de Notificaciones (Actualizada para evitar warnings)
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
-    shouldShowAlert: true,
+    shouldShowBanner: true, 
+    shouldShowList: true,
     shouldPlaySound: true,
     shouldSetBadge: false,
   }),
@@ -28,6 +30,10 @@ export default function App() {
   const [drawerVisible, setDrawerVisible] = useState(false);
   const [userPets, setUserPets] = useState([]);
   
+  // --- ESTADOS PARA DETALLES ---
+  const [selectedPet, setSelectedPet] = useState(null);
+  const [detailVisible, setDetailVisible] = useState(false);
+  
   // --- ESTADOS DEL FORMULARIO ---
   const [petName, setPetName] = useState('');
   const [petContact, setPetContact] = useState('');
@@ -35,20 +41,17 @@ export default function App() {
   const [selectedImage, setSelectedImage] = useState(null);
 
   const notifiedPets = useRef(new Set());
-useEffect(() => {
+
+  useEffect(() => {
     async function prepare() {
       try {
-        // Cargar mapa usando tu biblioteca backend.js
         await cargarMapa(setLostPets);
 
         const id = Device.osBuildId || Device.modelName || 'anonymous';
         setDeviceId(id);
 
-        // --- SOLICITUD DE PERMISOS (GPS, Notificaciones y Galería) ---
         let { status: gpsStatus } = await Location.requestForegroundPermissionsAsync();
         let { status: notifStatus } = await Notifications.requestPermissionsAsync();
-        
-        // AQUÍ PEGAS EL DE LA GALERÍA:
         let { status: galleryStatus } = await ImagePicker.requestMediaLibraryPermissionsAsync();
 
         if (gpsStatus !== 'granted') {
@@ -56,19 +59,15 @@ useEffect(() => {
         }
         
         if (galleryStatus !== 'granted') {
-          Alert.alert("Permiso necesario", "Necesitamos acceso a tus fotos para poder reportar mascotas con imagen.");
+          Alert.alert("Permiso necesario", "Necesitamos acceso a tus fotos para poder reportar.");
         }
 
-        // Si tenemos GPS, obtenemos ubicación y activamos el rastreo
         if (gpsStatus === 'granted') {
           let loc = await Location.getCurrentPositionAsync({});
           setLocation(loc);
 
           await Location.watchPositionAsync(
-            {
-              accuracy: Location.Accuracy.High,
-              distanceInterval: 10, 
-            },
+            { accuracy: Location.Accuracy.High, distanceInterval: 10 },
             (newLocation) => {
               setLocation(newLocation);
               verificarProximidad(newLocation, lostPets);
@@ -108,13 +107,25 @@ useEffect(() => {
     if (imagen) setSelectedImage(imagen);
   };
 
+  // Función para abrir la ficha de detalle
+  const verDetalle = (pet) => {
+    setSelectedPet(pet);
+    setDetailVisible(true);
+  };
+
+  // Función para llamar al dueño
+  const llamarDuenio = (numero) => {
+    if (!numero) return Alert.alert("Error", "No hay número de contacto.");
+    Linking.openURL(`tel:${numero}`);
+  };
+
   const handleReportar = async () => {
     if (!petName || !petContact || !location) {
       return Alert.alert("Faltan datos", "Por favor ingresa nombre y número de contacto.");
     }
 
     try {
-      setAppReady(false); // Mostramos carga mientras sube la foto
+      setAppReady(false);
       await registrarMascota({
         nombre: petName,
         contacto: petContact,
@@ -129,7 +140,7 @@ useEffect(() => {
       resetForm();
       Alert.alert("¡Éxito!", "Mascota reportada correctamente.");
     } catch (err) {
-      Alert.alert("Error", err.message === "DUPLICADO" ? "Ya reportaste a esta mascota." : "No se pudo enviar el reporte.");
+      Alert.alert("Error", err.message === "DUPLICADO" ? "Ya reportaste a esta mascota." : "No se pudo enviar.");
     } finally {
       setAppReady(true);
     }
@@ -196,23 +207,22 @@ useEffect(() => {
           showsUserLocation={true}
         >
           {lostPets.map(pet => (
-  // EL ESCUDO: Solo dibuja si existen coordenadas
-  pet.latitud && pet.longitud && (
-    <React.Fragment key={pet.id}>
-      <Marker 
-        coordinate={{ latitude: pet.latitud, longitude: pet.longitud }} 
-        title={`¡${pet.nombre} perdido!`} 
-        pinColor="red" 
-      />
-      <Circle 
-        center={{ latitude: pet.latitud, longitude: pet.longitud }} 
-        radius={200} 
-        fillColor="rgba(255, 0, 0, 0.1)" 
-        strokeColor="rgba(255, 0, 0, 0.3)" 
-      />
-    </React.Fragment>
-  )
-))}
+            pet.latitud && pet.longitud && (
+              <React.Fragment key={pet.id}>
+                <Marker 
+                  coordinate={{ latitude: pet.latitud, longitude: pet.longitud }} 
+                  pinColor="red"
+                  onPress={() => verDetalle(pet)} // Al tocar el pin, abre la ficha
+                />
+                <Circle 
+                  center={{ latitude: pet.latitud, longitude: pet.longitud }} 
+                  radius={200} 
+                  fillColor="rgba(255, 0, 0, 0.1)" 
+                  strokeColor="rgba(255, 0, 0, 0.3)" 
+                />
+              </React.Fragment>
+            )
+          ))}
         </MapView>
       )}
 
@@ -220,7 +230,42 @@ useEffect(() => {
         <Text style={styles.fabText}>+</Text>
       </TouchableOpacity>
 
-      {/* MODAL DE REPORTE ACTUALIZADO */}
+      {/* MODAL DE DETALLE DE MASCOTA (FICHA) */}
+      <Modal visible={detailVisible} animationType="slide" transparent={true}>
+        <View style={styles.detailOverlay}>
+          <View style={styles.detailContainer}>
+            {selectedPet && (
+              <>
+                <Text style={styles.detailTitle}>🚨 ¡Mascota Localizada!</Text>
+                
+                {selectedPet.imagen_url ? (
+                  <Image source={{ uri: selectedPet.imagen_url }} style={styles.detailImage} />
+                ) : (
+                  <View style={[styles.detailImage, {backgroundColor: '#f1f2f6', justifyContent: 'center', alignItems: 'center'}]}>
+                    <Text>Sin foto disponible</Text>
+                  </View>
+                )}
+
+                <Text style={styles.petNameText}>{selectedPet.nombre}</Text>
+                <Text style={styles.petDescText}>{selectedPet.descripcion || "Sin descripción adicional."}</Text>
+                
+                <TouchableOpacity 
+                  style={styles.callButton} 
+                  onPress={() => llamarDuenio(selectedPet.contacto)}
+                >
+                  <Text style={styles.callButtonText}>📞 Llamar al dueño</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity style={styles.closeBtn} onPress={() => setDetailVisible(false)}>
+                  <Text style={styles.closeBtnText}>Cerrar</Text>
+                </TouchableOpacity>
+              </>
+            )}
+          </View>
+        </View>
+      </Modal>
+
+      {/* MODAL DE REPORTE */}
       <Modal visible={modalVisible} animationType="slide" transparent={true}>
         <View style={styles.modalOverlay}>
           <ScrollView contentContainerStyle={styles.modalContent}>
@@ -278,6 +323,20 @@ const styles = StyleSheet.create({
   fabText: { color: 'white', fontSize: 35, fontWeight: 'bold' },
   menuButton: { position: 'absolute', top: 50, left: 20, zIndex: 10, backgroundColor: '#fff', width: 50, height: 50, borderRadius: 25, justifyContent: 'center', alignItems: 'center', elevation: 5 },
   menuIconText: { fontSize: 24, color: '#3d3430' },
+  
+  // ESTILOS DE LA FICHA DE DETALLES
+  detailOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },
+  detailContainer: { backgroundColor: 'white', borderTopLeftRadius: 30, borderTopRightRadius: 30, padding: 25, alignItems: 'center', elevation: 20 },
+  detailTitle: { fontSize: 18, fontWeight: 'bold', color: '#ff4757', marginBottom: 15 },
+  detailImage: { width: '100%', height: 200, borderRadius: 20, marginBottom: 15 },
+  petNameText: { fontSize: 24, fontWeight: 'bold', color: '#2f3542' },
+  petDescText: { fontSize: 16, color: '#57606f', textAlign: 'center', marginVertical: 10 },
+  callButton: { backgroundColor: '#2ed573', padding: 15, borderRadius: 15, width: '100%', alignItems: 'center', marginTop: 10 },
+  callButtonText: { color: 'white', fontWeight: 'bold', fontSize: 16 },
+  closeBtn: { marginTop: 15, padding: 10 },
+  closeBtnText: { color: '#a4b0be', fontWeight: 'bold' },
+
+  // OTROS ESTILOS
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center' },
   modalContent: { marginHorizontal: 20, backgroundColor: 'white', padding: 25, borderRadius: 25, elevation: 20 },
   modalTitle: { fontSize: 22, fontWeight: 'bold', marginBottom: 20, textAlign: 'center' },

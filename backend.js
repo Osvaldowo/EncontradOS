@@ -67,15 +67,33 @@ export const ejecutarEliminacion = async (petId, userPets, setUserPets, alTermin
  * 4. GALERÍA: Abre la galería y devuelve la imagen
  */
 export const seleccionarImagenDeGaleria = async () => {
-    const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaType.Images,
-        allowsEditing: true,
-        aspect: [1, 1],
-        quality: 0.4,
-        base64: true,
-    });
+    try {
+        // Forzamos la petición de permiso justo antes de abrir
+        const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+        
+        if (status !== 'granted') {
+            Alert.alert("Permiso denegado", "No podemos abrir la galería sin tu permiso.");
+            return null;
+        }
 
-    return !result.canceled ? result.assets[0] : null;
+        const result = await ImagePicker.launchImageLibraryAsync({
+            // Usamos la configuración más compatible
+            mediaTypes: ImagePicker.MediaTypeOptions.Images, 
+            allowsEditing: true,
+            aspect: [1, 1],
+            quality: 0.5,
+            base64: true,
+        });
+
+        if (!result.canceled && result.assets && result.assets.length > 0) {
+            return result.assets[0];
+        }
+        return null;
+    } catch (error) {
+        console.error("Error al abrir la galería:", error);
+        Alert.alert("Error", "No se pudo abrir la galería del dispositivo.");
+        return null;
+    }
 };
 
 /**
@@ -101,22 +119,16 @@ const subirFoto = async (imagen) => {
  */
 export const registrarMascota = async (datos) => {
     try {
-        // Validar duplicado
-        const { data: existe } = await supabase
-            .from('mascotas')
-            .select('id')
-            .eq('nombre', datos.nombre)
-            .eq('user_id', datos.deviceId);
-
-        if (existe && existe.length > 0) throw new Error("DUPLICADO");
-
-        // Subir foto si hay
+        console.log("--- INICIANDO REGISTRO ---");
+        
         let urlImagen = null;
         if (datos.imagenData) {
+            console.log("📸 Intentando subir foto a Storage...");
             urlImagen = await subirFoto(datos.imagenData);
+            console.log("🔗 URL obtenida:", urlImagen);
         }
 
-        // Insertar datos
+        console.log("📝 Insertando en base de datos...");
         const { error } = await supabase.from('mascotas').insert([
             {
                 nombre: datos.nombre,
@@ -129,9 +141,16 @@ export const registrarMascota = async (datos) => {
             }
         ]);
 
-        if (error) throw error;
+        if (error) {
+            // ESTO ES LO QUE NECESITO QUE ME DIGAS:
+            console.log("❌ ERROR DE SUPABASE DB:", error.message);
+            console.log("Detalles:", error.details);
+            throw error;
+        }
+
         return true;
     } catch (e) {
+        console.log("🔥 ERROR TOTAL EN EL PROCESO:", e.message);
         throw e;
     }
 };
