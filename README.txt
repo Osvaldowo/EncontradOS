@@ -74,8 +74,8 @@ npx expo start --tunnel
 --Interact with the Ficha: Tap the pet's marker to open the RPG-style detail card. From there, you can see the full photo and use the "¡LO ENCONTRÉ!" button to call the owner directly.
 
 🎓 Team EncontradOS
-Backend & Logic: [Your Team Name/Names]
+Backend & Logic: [Null Pointer, Osvaldo Flores, Ian Caballero]
 
-UI/UX & Aesthetics: [Your Team Name/Names]
+UI/UX & Aesthetics: [Null Pointer, Josue Sandoval, Guillermo Guerrero]
 
 Judge Note: This application is optimized for Expo Go to ensure maximum stability and cross-platform performance during the live demonstration. Please ensure "Location Services" are active for the best experience.
