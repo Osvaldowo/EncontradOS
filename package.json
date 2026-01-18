@@ -9,7 +9,9 @@
     "web": "expo start --web"
   },
   "dependencies": {
+    "@expo/ngrok": "^4.1.3",
     "@supabase/supabase-js": "^2.90.1",
+    "base64-arraybuffer": "^1.0.2",
     "expo": "~54.0.31",
     "expo-device": "~8.0.10",
     "expo-image-picker": "~17.0.10",
